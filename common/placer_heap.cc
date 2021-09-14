@@ -273,8 +273,8 @@ class HeAPPlacer
                          std::chrono::duration<double>(run_stopt - run_startt).count());
             }
 
-            // Update congestion estimates and target densities
-            estimate_congestion();
+            // Update congestion estimates and cell area scale
+            update_area_scale();
 
             // Update timing weights
             if (cfg.timing_driven)
@@ -1132,6 +1132,38 @@ class HeAPPlacer
             for (int y = bb.y0; y <= bb.y1; y++)
                 for (int x = bb.x0; x <= bb.x1; x++)
                     congestion_map.at(y).at(x) += weight;
+        }
+    }
+    void update_area_scale()
+    {
+        estimate_congestion();
+        std::vector<std::tuple<int, int, double>> sorted_by_cong;
+        for (int y = 0; y <= max_y; y++) {
+            for (int x = 0; x <= max_x; x++) {
+                double cong = congestion_map.at(y).at(x);
+                if (cong == 0)
+                    continue;
+                sorted_by_cong.emplace_back(x, y, cong);
+            }
+        }
+        std::stable_sort(sorted_by_cong.begin(), sorted_by_cong.end(),
+                         [&](const std::tuple<int, int, double> &a, const std::tuple<int, int, double> &b) {
+                             return std::get<2>(a) < std::get<2>(b);
+                         });
+        std::vector<std::vector<int>> cong_ranking(max_y + 1, std::vector<int>(max_x + 1, 0));
+        for (int i = 0; i < int(cong_ranking.size()); i++) {
+            auto entry = sorted_by_cong.at(i);
+            cong_ranking.at(std::get<1>(entry)).at(std::get<0>(entry)) = i;
+        }
+        for (auto &cell_entry : cell_locs) {
+            CellInfo *cell = ctx->cells.at(cell_entry.first).get();
+            Loc loc = ctx->getBelLocation(cell->bel);
+            int ranking = cong_ranking.at(loc.y).at(loc.x);
+            double cong = congestion_map.at(loc.y).at(loc.x);
+            if (ranking >= (int(sorted_by_cong.size()) * 0.9) && cong > 360)
+                cell_entry.second.area_scale *= 1.2;
+            else if (ranking < (int(sorted_by_cong.size()) * 0.3) && cong < 180)
+                cell_entry.second.area_scale *= 0.8;
         }
     }
 
