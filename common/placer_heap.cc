@@ -273,6 +273,9 @@ class HeAPPlacer
                          std::chrono::duration<double>(run_stopt - run_startt).count());
             }
 
+            // Update congestion estimates and target densities
+            estimate_congestion();
+
             // Update timing weights
             if (cfg.timing_driven)
                 tmg.run();
@@ -1076,6 +1079,59 @@ class HeAPPlacer
         int limit_low = dir ? constraint_region_bounds[reg->name].y0 : constraint_region_bounds[reg->name].x0;
         int limit_high = dir ? constraint_region_bounds[reg->name].y1 : constraint_region_bounds[reg->name].x1;
         return std::max<T>(std::min<T>(val, limit_high), limit_low);
+    }
+
+    std::vector<std::vector<double>> congestion_map;
+    void estimate_congestion()
+    {
+        congestion_map.resize(max_y + 1);
+        for (int y = 0; y <= max_y; y++) {
+            congestion_map.at(y).resize(max_x + 1);
+            std::fill(congestion_map.at(y).begin(), congestion_map.at(y).end(), 0);
+        }
+        auto get_pincount_weight = [](int pins) {
+            // Magic numbers from
+            // https://github.com/cuhk-eda/ripple-fpga/blob/059646fcaa0c8d77e4283f55be2bd5692862a039/src/cong/cong_est_bb.cpp#L21-L34
+            if (pins < 10)
+                return 1.06;
+            else if (pins < 20)
+                return 1.2;
+            else if (pins < 30)
+                return 1.4;
+            else if (pins < 50)
+                return 1.6;
+            else if (pins < 100)
+                return 1.8;
+            else if (pins < 200)
+                return 2.1;
+            else
+                return 3.0;
+        };
+        for (auto &net : ctx->nets) {
+            NetInfo *ni = net.second.get();
+            if (ni->driver.cell == nullptr)
+                continue;
+            Loc drv_loc = ctx->getBelLocation(ni->driver.cell->bel);
+            ArcBounds bb;
+            bb.x0 = drv_loc.x;
+            bb.y0 = drv_loc.y;
+            bb.x1 = drv_loc.x;
+            bb.y1 = drv_loc.y;
+            for (const auto &usr : ni->users) {
+                Loc usr_loc = ctx->getBelLocation(usr.cell->bel);
+                bb.x0 = std::min(bb.x0, usr_loc.x);
+                bb.y0 = std::min(bb.y0, usr_loc.y);
+                bb.x1 = std::max(bb.x1, usr_loc.x);
+                bb.y1 = std::max(bb.y1, usr_loc.y);
+            }
+            int hpwl = (bb.y1 - bb.y0) + (bb.x1 - bb.x0);
+            double weight = (hpwl + 1) * get_pincount_weight(int(ni->users.size()) + 1);
+            int total_switchboxes = ((bb.x1 - bb.x0) + 1) * ((bb.y1 - bb.y0) + 1);
+            weight /= total_switchboxes;
+            for (int y = bb.y0; y <= bb.y1; y++)
+                for (int x = bb.x0; x <= bb.x1; x++)
+                    congestion_map.at(y).at(x) += weight;
+        }
     }
 
     struct ChainExtent
