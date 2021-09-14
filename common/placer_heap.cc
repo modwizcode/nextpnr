@@ -382,6 +382,7 @@ class HeAPPlacer
         int legal_x, legal_y;
         double rawx, rawy;
         bool locked, global;
+        double area_scale = 1.0;
     };
     dict<IdString, CellLocation> cell_locs;
     // The set of cells that we will actually place. This excludes locked cells and children cells of macros/chains
@@ -1143,15 +1144,17 @@ class HeAPPlacer
     {
         int id;
         int x0, y0, x1, y1;
-        std::vector<int> cells, bels;
+        std::vector<int> cell_count;
+        std::vector<double> cell_area;
+        std::vector<int> bels;
         bool overused(float beta) const
         {
-            for (size_t t = 0; t < cells.size(); t++) {
+            for (size_t t = 0; t < cell_area.size(); t++) {
                 if (bels.at(t) < 4) {
-                    if (cells.at(t) > bels.at(t))
+                    if (cell_area.at(t) > bels.at(t))
                         return true;
                 } else {
-                    if (cells.at(t) > beta * bels.at(t))
+                    if (cell_area.at(t) > beta * bels.at(t))
                         return true;
                 }
             }
@@ -1203,7 +1206,7 @@ class HeAPPlacer
 #if 0
                 for (auto t : sorted(beltype)) {
                     log_info("%s (%d, %d) |_> (%d, %d) %d/%d\n", t.c_str(ctx), r.x0, r.y0, r.x1, r.y1,
-                             r.cells.at(type_index.at(t)), r.bels.at(type_index.at(t)));
+                             r.cell_count.at(type_index.at(t)), r.bels.at(type_index.at(t)));
                 }
 
 #endif
@@ -1213,7 +1216,7 @@ class HeAPPlacer
                 auto front = workqueue.front();
                 workqueue.pop();
                 auto &r = regions.at(front.first);
-                if (std::all_of(r.cells.begin(), r.cells.end(), [](int x) { return x == 0; }))
+                if (std::all_of(r.cell_count.begin(), r.cell_count.end(), [](int x) { return x == 0; }))
                     continue;
                 auto res = cut_region(r, front.second);
                 if (res) {
@@ -1256,7 +1259,8 @@ class HeAPPlacer
         Context *ctx;
         pool<BelBucketId> buckets;
         dict<BelBucketId, size_t> type_index;
-        std::vector<std::vector<std::vector<int>>> occupancy;
+        std::vector<std::vector<std::vector<std::pair<int, double>>>> occupancy;
+
         std::vector<std::vector<int>> groups;
         std::vector<std::vector<ChainExtent>> chaines;
         std::map<IdString, ChainExtent> cell_extents;
@@ -1268,7 +1272,7 @@ class HeAPPlacer
         // Cells at a location, sorted by real (not integer) x and y
         std::vector<std::vector<std::vector<CellInfo *>>> cells_at_location;
 
-        int occ_at(int x, int y, int type) { return occupancy.at(x).at(y).at(type); }
+        std::pair<int, double> occ_at(int x, int y, int type) { return occupancy.at(x).at(y).at(type); }
 
         int bels_at(int x, int y, int type)
         {
@@ -1286,15 +1290,16 @@ class HeAPPlacer
 
         void init()
         {
-            occupancy.resize(p->max_x + 1,
-                             std::vector<std::vector<int>>(p->max_y + 1, std::vector<int>(buckets.size(), 0)));
+            occupancy.resize(p->max_x + 1, std::vector<std::vector<std::pair<int, double>>>(
+                                                   p->max_y + 1, std::vector<std::pair<int, double>>(
+                                                                         buckets.size(), std::make_pair(0, 0))));
             groups.resize(p->max_x + 1, std::vector<int>(p->max_y + 1, -1));
             chaines.resize(p->max_x + 1, std::vector<ChainExtent>(p->max_y + 1));
             cells_at_location.resize(p->max_x + 1, std::vector<std::vector<CellInfo *>>(p->max_y + 1));
             for (int x = 0; x <= p->max_x; x++)
                 for (int y = 0; y <= p->max_y; y++) {
                     for (int t = 0; t < int(buckets.size()); t++) {
-                        occupancy.at(x).at(y).at(t) = 0;
+                        occupancy.at(x).at(y).at(t) = std::make_pair(0, 0);
                     }
                     groups.at(x).at(y) = -1;
                     chaines.at(x).at(y) = {x, y, x, y};
@@ -1323,7 +1328,9 @@ class HeAPPlacer
                     continue;
                 }
 
-                occupancy.at(cell_loc.second.x).at(cell_loc.second.y).at(cell_index(cell))++;
+                occupancy.at(cell_loc.second.x).at(cell_loc.second.y).at(cell_index(cell)).first += 1; // cell count
+                occupancy.at(cell_loc.second.x).at(cell_loc.second.y).at(cell_index(cell)).second +=
+                        loc.area_scale; // cell area
 
                 // Compute ultimate extent of each chain root
                 if (cell.cluster != ClusterId()) {
@@ -1376,7 +1383,9 @@ class HeAPPlacer
                     NPNR_ASSERT(groups.at(x).at(y) == mergee.id);
                     groups.at(x).at(y) = merged.id;
                     for (size_t t = 0; t < buckets.size(); t++) {
-                        merged.cells.at(t) += occ_at(x, y, t);
+                        auto occ = occ_at(x, y, t);
+                        merged.cell_count.at(t) += occ.first;
+                        merged.cell_area.at(t) += occ.second;
                         merged.bels.at(t) += bels_at(x, y, t);
                     }
                 }
@@ -1401,8 +1410,10 @@ class HeAPPlacer
                 // Merge with any overlapping regions
                 if (groups.at(x).at(y) == -1) {
                     for (size_t t = 0; t < buckets.size(); t++) {
+                        auto occ = occ_at(x, y, t);
                         r.bels.at(t) += bels_at(x, y, t);
-                        r.cells.at(t) += occ_at(x, y, t);
+                        r.cell_count.at(t) += occ.first;
+                        r.cell_area.at(t) += occ.second;
                     }
                 }
 
@@ -1436,7 +1447,7 @@ class HeAPPlacer
                         continue;
                     bool overutilised = false;
                     for (size_t t = 0; t < buckets.size(); t++) {
-                        if (occ_at(x, y, t) > bels_at(x, y, t)) {
+                        if (occ_at(x, y, t).second > bels_at(x, y, t)) {
                             overutilised = true;
                             break;
                         }
@@ -1452,8 +1463,10 @@ class HeAPPlacer
                     reg.x0 = reg.x1 = x;
                     reg.y0 = reg.y1 = y;
                     for (size_t t = 0; t < buckets.size(); t++) {
+                        auto occ = occ_at(x, y, t);
                         reg.bels.push_back(bels_at(x, y, t));
-                        reg.cells.push_back(occ_at(x, y, t));
+                        reg.cell_count.push_back(occ.first);
+                        reg.cell_area.push_back(occ.second);
                     }
                     // Make sure we cover carries, etc
                     grow_region(reg, reg.x0, reg.y0, reg.x1, reg.y1, true);
@@ -1469,7 +1482,7 @@ class HeAPPlacer
                             bool over_occ_x = false;
                             for (int y1 = reg.y0; y1 <= reg.y1; y1++) {
                                 for (size_t t = 0; t < buckets.size(); t++) {
-                                    if (occ_at(reg.x1 + 1, y1, t) > bels_at(reg.x1 + 1, y1, t)) {
+                                    if (occ_at(reg.x1 + 1, y1, t).second > bels_at(reg.x1 + 1, y1, t)) {
                                         over_occ_x = true;
                                         break;
                                     }
@@ -1485,7 +1498,7 @@ class HeAPPlacer
                             bool over_occ_y = false;
                             for (int x1 = reg.x0; x1 <= reg.x1; x1++) {
                                 for (size_t t = 0; t < buckets.size(); t++) {
-                                    if (occ_at(x1, reg.y1 + 1, t) > bels_at(x1, reg.y1 + 1, t)) {
+                                    if (occ_at(x1, reg.y1 + 1, t).second > bels_at(x1, reg.y1 + 1, t)) {
                                         over_occ_y = true;
                                         break;
                                     }
@@ -1547,10 +1560,11 @@ class HeAPPlacer
                     }
                     if (!changed) {
                         for (auto bucket : buckets) {
-                            if (reg.cells > reg.bels) {
+                            if (reg.cell_count > reg.bels) {
                                 IdString bucket_name = ctx->getBelBucketName(bucket);
                                 log_error("Failed to expand region (%d, %d) |_> (%d, %d) of %d %ss\n", reg.x0, reg.y0,
-                                          reg.x1, reg.y1, reg.cells.at(type_index.at(bucket)), bucket_name.c_str(ctx));
+                                          reg.x1, reg.y1, reg.cell_count.at(type_index.at(bucket)),
+                                          bucket_name.c_str(ctx));
                             }
                         }
                         break;
@@ -1659,14 +1673,21 @@ class HeAPPlacer
                 return {};
             // Now find the initial target cut that minimises utilisation imbalance, whilst
             // meeting the clearance requirements for any large macros
-            std::vector<int> left_cells_v(buckets.size(), 0), right_cells_v(buckets.size(), 0);
+            std::vector<int> left_cell_counts_v(buckets.size(), 0), right_cell_counts_v(buckets.size(), 0);
+            std::vector<double> left_cell_areas_v(buckets.size(), 0), right_cell_areas_v(buckets.size(), 0);
             std::vector<int> left_bels_v(buckets.size(), 0), right_bels_v(r.bels);
-            for (int i = 0; i <= pivot; i++)
-                left_cells_v.at(cell_index(*cut_cells.at(i))) +=
-                        p->chain_size.count(cut_cells.at(i)->name) ? p->chain_size.at(cut_cells.at(i)->name) : 1;
-            for (int i = pivot + 1; i < int(cut_cells.size()); i++)
-                right_cells_v.at(cell_index(*cut_cells.at(i))) +=
-                        p->chain_size.count(cut_cells.at(i)->name) ? p->chain_size.at(cut_cells.at(i)->name) : 1;
+            for (int i = 0; i <= pivot; i++) {
+                int size = p->chain_size.count(cut_cells.at(i)->name) ? p->chain_size.at(cut_cells.at(i)->name) : 1;
+                double scaled_size = size * p->cell_locs.at(cut_cells.at(i)->name).area_scale;
+                left_cell_counts_v.at(cell_index(*cut_cells.at(i))) += size;
+                left_cell_areas_v.at(cell_index(*cut_cells.at(i))) += scaled_size;
+            }
+            for (int i = pivot + 1; i < int(cut_cells.size()); i++) {
+                int size = p->chain_size.count(cut_cells.at(i)->name) ? p->chain_size.at(cut_cells.at(i)->name) : 1;
+                double scaled_size = size * p->cell_locs.at(cut_cells.at(i)->name).area_scale;
+                right_cell_counts_v.at(cell_index(*cut_cells.at(i))) += size;
+                right_cell_areas_v.at(cell_index(*cut_cells.at(i))) += scaled_size;
+            }
 
             int best_tgt_cut = -1;
             double best_deltaU = std::numeric_limits<double>::max();
@@ -1688,9 +1709,9 @@ class HeAPPlacer
                     // Solution is potentially valid
                     double aU = 0;
                     for (size_t t = 0; t < buckets.size(); t++)
-                        aU += (left_cells_v.at(t) + right_cells_v.at(t)) *
-                              std::abs(double(left_cells_v.at(t)) / double(std::max(left_bels_v.at(t), 1)) -
-                                       double(right_cells_v.at(t)) / double(std::max(right_bels_v.at(t), 1)));
+                        aU += (left_cell_counts_v.at(t) + right_cell_counts_v.at(t)) *
+                              std::abs(double(left_cell_counts_v.at(t)) / double(std::max(left_bels_v.at(t), 1)) -
+                                       double(right_cell_counts_v.at(t)) / double(std::max(right_bels_v.at(t), 1)));
                     if (aU < best_deltaU) {
                         best_deltaU = aU;
                         best_tgt_cut = i;
@@ -1724,24 +1745,30 @@ class HeAPPlacer
             // Perturb the source cut to eliminate overutilisation
             auto is_part_overutil = [&](bool r) {
                 double delta = 0;
-                for (size_t t = 0; t < left_cells_v.size(); t++) {
-                    delta += double(left_cells_v.at(t)) / double(std::max(left_bels_v.at(t), 1)) -
-                             double(right_cells_v.at(t)) / double(std::max(right_bels_v.at(t), 1));
+                for (size_t t = 0; t < left_cell_areas_v.size(); t++) {
+                    delta += double(left_cell_areas_v.at(t)) / double(std::max(left_bels_v.at(t), 1)) -
+                             double(right_cell_areas_v.at(t)) / double(std::max(right_bels_v.at(t), 1));
                 }
                 return r ? delta < 0 : delta > 0;
             };
             while (pivot > 0 && is_part_overutil(false)) {
                 auto &move_cell = cut_cells.at(pivot);
                 int size = p->chain_size.count(move_cell->name) ? p->chain_size.at(move_cell->name) : 1;
-                left_cells_v.at(cell_index(*cut_cells.at(pivot))) -= size;
-                right_cells_v.at(cell_index(*cut_cells.at(pivot))) += size;
+                double scaled_size = size * p->cell_locs.at(move_cell->name).area_scale;
+                left_cell_counts_v.at(cell_index(*cut_cells.at(pivot))) -= size;
+                left_cell_areas_v.at(cell_index(*cut_cells.at(pivot))) -= scaled_size;
+                right_cell_counts_v.at(cell_index(*cut_cells.at(pivot))) += size;
+                right_cell_areas_v.at(cell_index(*cut_cells.at(pivot))) += scaled_size;
                 pivot--;
             }
             while (pivot < int(cut_cells.size()) - 1 && is_part_overutil(true)) {
                 auto &move_cell = cut_cells.at(pivot + 1);
                 int size = p->chain_size.count(move_cell->name) ? p->chain_size.at(move_cell->name) : 1;
-                left_cells_v.at(cell_index(*cut_cells.at(pivot))) += size;
-                right_cells_v.at(cell_index(*cut_cells.at(pivot))) -= size;
+                double scaled_size = size * p->cell_locs.at(move_cell->name).area_scale;
+                left_cell_counts_v.at(cell_index(*cut_cells.at(pivot))) += size;
+                left_cell_areas_v.at(cell_index(*cut_cells.at(pivot))) += scaled_size;
+                right_cell_counts_v.at(cell_index(*cut_cells.at(pivot))) -= size;
+                right_cell_areas_v.at(cell_index(*cut_cells.at(pivot))) -= scaled_size;
                 pivot++;
             }
 
@@ -1809,14 +1836,16 @@ class HeAPPlacer
             rl.y0 = r.y0;
             rl.x1 = dir ? r.x1 : best_tgt_cut;
             rl.y1 = dir ? best_tgt_cut : r.y1;
-            rl.cells = left_cells_v;
+            rl.cell_count = left_cell_counts_v;
+            rl.cell_area = left_cell_areas_v;
             rl.bels = left_bels_v;
             rr.id = int(regions.size()) + 1;
             rr.x0 = dir ? r.x0 : (best_tgt_cut + 1);
             rr.y0 = dir ? (best_tgt_cut + 1) : r.y0;
             rr.x1 = r.x1;
             rr.y1 = r.y1;
-            rr.cells = right_cells_v;
+            rl.cell_count = right_cell_counts_v;
+            rl.cell_area = right_cell_areas_v;
             rr.bels = right_bels_v;
             regions.push_back(rl);
             regions.push_back(rr);
