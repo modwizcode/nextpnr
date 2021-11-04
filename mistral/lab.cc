@@ -960,10 +960,13 @@ uint64_t get_lut_init(const CellInfo *cell, int i)
         return 2;
     } else {
         IdString prop;
-        if (cell->type == id_MISTRAL_ALUT_ARITH)
+        if (cell->type == id_MISTRAL_ALUT_ARITH) {
             prop = (i == 1) ? id_LUT1 : id_LUT0;
-        else
+        } else if (cell->type == id_MISTRAL_MLAB) {
+            prop = id_INIT;
+        } else {
             prop = id_LUT;
+        }
         auto fnd = cell->params.find(prop);
         if (fnd == cell->params.end())
             return 0;

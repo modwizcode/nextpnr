@@ -236,7 +236,7 @@ struct MistralBitgen
                 cv->bmux_m_set(block_type, pos, CycloneV::MODE, i, CycloneV::RAM);
                 cv->bmux_n_set(block_type, pos, CycloneV::T_FEEDBACK_SEL, i, 1);
             }
-            cv->bmux_r_set(block_type, pos, CycloneV::LUT_MASK, alm, 0xFFFFFFFFFFFFFFFFULL); // TODO: LUTRAM init
+            cv->bmux_r_set(block_type, pos, CycloneV::LUT_MASK, alm, ctx->compute_lut_mask(lab, alm)); // TODO: LUTRAM init
             cv->bmux_b_set(block_type, pos, CycloneV::BPKREG1, alm, true);
             cv->bmux_b_set(block_type, pos, CycloneV::TPKREG0, alm, true);
             cv->bmux_m_set(block_type, pos, CycloneV::MCRG_VOLTAGE, 0, CycloneV::VCCL);
